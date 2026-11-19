@@ -1,0 +1,250 @@
+const ADMIN_USERNAME = "SameanMom168";
+const DEFAULT_SPLIT_RATIO = 0.5; // 50% User / 50% Admin
+const MEMORY_STORE = {
+  state: {
+    adminBalance: 0,
+    totalSystemViews: 0,
+    customAdLinks: [],
+    adminBank: "000 000 000 (Admin Default)",
+    updatedAt: new Date().toISOString()
+  },
+  users: {}
+};
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Content-Type": "application/json; charset=utf-8"
+  };
+}
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: corsHeaders()
+  });
+}
+
+function isValidHttpUrl(str) {
+  try {
+    const u = new URL(String(str || "").trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function normalizeAdLinks(input) {
+  const rawList = Array.isArray(input)
+    ? input
+    : typeof input === "string"
+      ? input.split(/\r?\n/)
+      : [];
+
+  const unique = [];
+  for (const item of rawList) {
+    const cleaned = String(item || "").trim();
+    if (cleaned && isValidHttpUrl(cleaned) && !unique.includes(cleaned)) {
+      unique.push(cleaned);
+    }
+  }
+  return unique;
+}
+
+async function readSystemState(env) {
+  if (env && env.REWARDS_KV) {
+    const raw = await env.REWARDS_KV.get("system_state");
+    if (raw) {
+      return { ...MEMORY_STORE.state, ...JSON.parse(raw) };
+    }
+  }
+  return { ...MEMORY_STORE.state };
+}
+
+async function writeSystemState(env, nextState) {
+  const merged = {
+    ...MEMORY_STORE.state,
+    ...nextState,
+    updatedAt: new Date().toISOString()
+  };
+  MEMORY_STORE.state = merged;
+  if (env && env.REWARDS_KV) {
+    await env.REWARDS_KV.put("system_state", JSON.stringify(merged));
+  }
+  return merged;
+}
+
+async function readUserState(env, userId) {
+  const key = `user_${String(userId || "anonymous")}`;
+  if (env && env.REWARDS_KV) {
+    const raw = await env.REWARDS_KV.get(key);
+    if (raw) {
+      return { balance: 0, views: 0, ...JSON.parse(raw) };
+    }
+  }
+  return MEMORY_STORE.users[key] || { balance: 0, views: 0 };
+}
+
+async function writeUserState(env, userId, nextUser) {
+  const key = `user_${String(userId || "anonymous")}`;
+  const merged = {
+    balance: Number(Number(nextUser.balance || 0).toFixed(6)),
+    views: Number(nextUser.views || 0)
+  };
+  MEMORY_STORE.users[key] = merged;
+  if (env && env.REWARDS_KV) {
+    await env.REWARDS_KV.put(key, JSON.stringify(merged));
+  }
+  return merged;
+}
+
+export default {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+
+    try {
+      // GET /state?userId=...
+      if (request.method === "GET" && path === "/state") {
+        const userId = url.searchParams.get("userId") || "local_test_user";
+        const sysState = await readSystemState(env);
+        const userState = await readUserState(env, userId);
+
+        return jsonResponse({
+          ok: true,
+          adminUsername: ADMIN_USERNAME,
+          adminBalance: Number(Number(sysState.adminBalance || 0).toFixed(6)),
+          totalSystemViews: Number(sysState.totalSystemViews || 0),
+          customAdLinks: normalizeAdLinks(sysState.customAdLinks),
+          adminBank: sysState.adminBank || "",
+          updatedAt: sysState.updatedAt,
+          userBalance: Number(Number(userState.balance || 0).toFixed(6)),
+          userViews: Number(userState.views || 0)
+        });
+      }
+
+      // POST /settings (Admin @SameanMom168 កំណត់ Link Ads ជាច្រើន និងគណនីធនាគារ)
+      if (request.method === "POST" && path === "/settings") {
+        const body = await request.json();
+        const requester = String(body.adminUsername || "").replace(/^@/, "").trim();
+
+        if (requester.toLowerCase() !== ADMIN_USERNAME.toLowerCase()) {
+          return jsonResponse({ ok: false, error: "Unauthorized admin" }, 403);
+        }
+
+        const currentSys = await readSystemState(env);
+        const linksSource = body.customAdLinks !== undefined ? body.customAdLinks : body.customAdLink;
+        const nextLinks = linksSource !== undefined ? normalizeAdLinks(linksSource) : normalizeAdLinks(currentSys.customAdLinks);
+        const nextBank = typeof body.adminBank === "string" && body.adminBank.trim()
+          ? body.adminBank.trim()
+          : currentSys.adminBank;
+
+        const savedSys = await writeSystemState(env, {
+          ...currentSys,
+          customAdLinks: nextLinks,
+          adminBank: nextBank
+        });
+
+        return jsonResponse({
+          ok: true,
+          customAdLinks: savedSys.customAdLinks,
+          adminBank: savedSys.adminBank,
+          updatedAt: savedSys.updatedAt
+        });
+      }
+
+      // POST /reward (គណនា និង Update ចំណូល ៥០/៥០ ពេលមើល Ads ចប់)
+      if (request.method === "POST" && path === "/reward") {
+        const body = await request.json();
+        const userId = String(body.userId || "").trim();
+        if (!userId) {
+          return jsonResponse({ ok: false, error: "Missing userId" }, 400);
+        }
+
+        const totalValue = typeof body.totalAdValue === "number" && body.totalAdValue > 0
+          ? body.totalAdValue
+          : 0.02;
+        const userShare = typeof body.userShare === "number" && body.userShare >= 0
+          ? body.userShare
+          : Number((totalValue * DEFAULT_SPLIT_RATIO).toFixed(6));
+        const adminShare = typeof body.adminShare === "number" && body.adminShare >= 0
+          ? body.adminShare
+          : Number((totalValue - userShare).toFixed(6));
+
+        const sysState = await readSystemState(env);
+        const userState = await readUserState(env, userId);
+
+        const nextUserBalance = Number((Number(userState.balance || 0) + userShare).toFixed(6));
+        const nextUserViews = Number(userState.views || 0) + 1;
+        const savedUser = await writeUserState(env, userId, {
+          balance: nextUserBalance,
+          views: nextUserViews
+        });
+
+        const nextAdminBalance = Number((Number(sysState.adminBalance || 0) + adminShare).toFixed(6));
+        const nextTotalViews = Number(sysState.totalSystemViews || 0) + 1;
+        const savedSys = await writeSystemState(env, {
+          ...sysState,
+          adminBalance: nextAdminBalance,
+          totalSystemViews: nextTotalViews
+        });
+
+        return jsonResponse({
+          ok: true,
+          userId,
+          userBalance: savedUser.balance,
+          userViews: savedUser.views,
+          adminBalance: savedSys.adminBalance,
+          totalSystemViews: savedSys.totalSystemViews,
+          updatedAt: savedSys.updatedAt
+        });
+      }
+
+      // POST /withdraw (កត់ត្រាការដកប្រាក់អប្បបរមា $1.00)
+      if (request.method === "POST" && path === "/withdraw") {
+        const body = await request.json();
+        const userId = String(body.userId || "").trim();
+        const method = String(body.method || "").trim();
+        const accountInfo = String(body.accountInfo || "").trim();
+
+        if (!userId || !method || !accountInfo) {
+          return jsonResponse({ ok: false, error: "Invalid withdraw fields" }, 400);
+        }
+
+        const userState = await readUserState(env, userId);
+        const currentBalance = Number(userState.balance || 0);
+        if (currentBalance < 1.0) {
+          return jsonResponse({ ok: false, error: "Minimum withdrawal is $1.00" }, 400);
+        }
+
+        await writeUserState(env, userId, {
+          balance: 0,
+          views: Number(userState.views || 0)
+        });
+
+        return jsonResponse({
+          ok: true,
+          withdrawnAmount: Number(currentBalance.toFixed(3)),
+          method,
+          accountInfo,
+          userBalance: 0
+        });
+      }
+
+      return jsonResponse({
+        ok: true,
+        service: "Khmer Rewards Cloudflare Worker",
+        admin: ADMIN_USERNAME,
+        endpoints: ["/state", "/settings", "/reward", "/withdraw"]
+      });
+    } catch (err) {
+      return jsonResponse({ ok: false, error: err.message || "Server error" }, 500);
+    }
+  }
+};
