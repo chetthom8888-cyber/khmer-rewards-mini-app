@@ -1,250 +1,999 @@
-const ADMIN_USERNAME = "SameanMom168";
-const DEFAULT_SPLIT_RATIO = 0.5; // 50% User / 50% Admin
-const MEMORY_STORE = {
-  state: {
-    adminBalance: 0,
-    totalSystemViews: 0,
-    customAdLinks: [],
-    adminBank: "000 000 000 (Admin Default)",
-    updatedAt: new Date().toISOString()
-  },
-  users: {}
-};
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Content-Type": "application/json; charset=utf-8"
-  };
-}
-
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: corsHeaders()
-  });
-}
-
-function isValidHttpUrl(str) {
-  try {
-    const u = new URL(String(str || "").trim());
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch (_) {
-    return false;
-  }
-}
-
-function normalizeAdLinks(input) {
-  const rawList = Array.isArray(input)
-    ? input
-    : typeof input === "string"
-      ? input.split(/\r?\n/)
-      : [];
-
-  const unique = [];
-  for (const item of rawList) {
-    const cleaned = String(item || "").trim();
-    if (cleaned && isValidHttpUrl(cleaned) && !unique.includes(cleaned)) {
-      unique.push(cleaned);
-    }
-  }
-  return unique;
-}
-
-async function readSystemState(env) {
-  if (env && env.REWARDS_KV) {
-    const raw = await env.REWARDS_KV.get("system_state");
-    if (raw) {
-      return { ...MEMORY_STORE.state, ...JSON.parse(raw) };
-    }
-  }
-  return { ...MEMORY_STORE.state };
-}
-
-async function writeSystemState(env, nextState) {
-  const merged = {
-    ...MEMORY_STORE.state,
-    ...nextState,
-    updatedAt: new Date().toISOString()
-  };
-  MEMORY_STORE.state = merged;
-  if (env && env.REWARDS_KV) {
-    await env.REWARDS_KV.put("system_state", JSON.stringify(merged));
-  }
-  return merged;
-}
-
-async function readUserState(env, userId) {
-  const key = `user_${String(userId || "anonymous")}`;
-  if (env && env.REWARDS_KV) {
-    const raw = await env.REWARDS_KV.get(key);
-    if (raw) {
-      return { balance: 0, views: 0, ...JSON.parse(raw) };
-    }
-  }
-  return MEMORY_STORE.users[key] || { balance: 0, views: 0 };
-}
-
-async function writeUserState(env, userId, nextUser) {
-  const key = `user_${String(userId || "anonymous")}`;
-  const merged = {
-    balance: Number(Number(nextUser.balance || 0).toFixed(6)),
-    views: Number(nextUser.views || 0)
-  };
-  MEMORY_STORE.users[key] = merged;
-  if (env && env.REWARDS_KV) {
-    await env.REWARDS_KV.put(key, JSON.stringify(merged));
-  }
-  return merged;
-}
-
-export default {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-
-    try {
-      // GET /state?userId=...
-      if (request.method === "GET" && path === "/state") {
-        const userId = url.searchParams.get("userId") || "local_test_user";
-        const sysState = await readSystemState(env);
-        const userState = await readUserState(env, userId);
-
-        return jsonResponse({
-          ok: true,
-          adminUsername: ADMIN_USERNAME,
-          adminBalance: Number(Number(sysState.adminBalance || 0).toFixed(6)),
-          totalSystemViews: Number(sysState.totalSystemViews || 0),
-          customAdLinks: normalizeAdLinks(sysState.customAdLinks),
-          adminBank: sysState.adminBank || "",
-          updatedAt: sysState.updatedAt,
-          userBalance: Number(Number(userState.balance || 0).toFixed(6)),
-          userViews: Number(userState.views || 0)
-        });
-      }
-
-      // POST /settings (Admin @SameanMom168 កំណត់ Link Ads ជាច្រើន និងគណនីធនាគារ)
-      if (request.method === "POST" && path === "/settings") {
-        const body = await request.json();
-        const requester = String(body.adminUsername || "").replace(/^@/, "").trim();
-
-        if (requester.toLowerCase() !== ADMIN_USERNAME.toLowerCase()) {
-          return jsonResponse({ ok: false, error: "Unauthorized admin" }, 403);
+<!DOCTYPE html>
+<html lang="km">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Khmer Rewards</title>
+    <!-- Google Fonts: Khmer Bokor -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Khmer+Bokor&display=swap" rel="stylesheet">
+    <!-- Telegram WebApp SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!-- AdsGram SDK -->
+    <script src="https://sad.adsgram.ai/js/sad.min.js"></script>
+    <style>
+        :root {
+            --aba-blue: #0055a5;
+            --aba-dark: #061322;
+            --aba-card: #ffffff;
+            --text-main: #1e293b;
+            --text-sub: #64748b;
+            --success: #059669;
+            --danger: #dc2626;
+            --bg-body: #071629;
+            --khmer-gold: #eab308;
+            --khmer-gold-bright: #facc15;
+            --khmer-maroon: #6e0d14;
+            --khmer-maroon-dark: #45060b;
         }
 
-        const currentSys = await readSystemState(env);
-        const linksSource = body.customAdLinks !== undefined ? body.customAdLinks : body.customAdLink;
-        const nextLinks = linksSource !== undefined ? normalizeAdLinks(linksSource) : normalizeAdLinks(currentSys.customAdLinks);
-        const nextBank = typeof body.adminBank === "string" && body.adminBank.trim()
-          ? body.adminBank.trim()
-          : currentSys.adminBank;
-
-        const savedSys = await writeSystemState(env, {
-          ...currentSys,
-          customAdLinks: nextLinks,
-          adminBank: nextBank
-        });
-
-        return jsonResponse({
-          ok: true,
-          customAdLinks: savedSys.customAdLinks,
-          adminBank: savedSys.adminBank,
-          updatedAt: savedSys.updatedAt
-        });
-      }
-
-      // POST /reward (គណនា និង Update ចំណូល ៥០/៥០ ពេលមើល Ads ចប់)
-      if (request.method === "POST" && path === "/reward") {
-        const body = await request.json();
-        const userId = String(body.userId || "").trim();
-        if (!userId) {
-          return jsonResponse({ ok: false, error: "Missing userId" }, 400);
+        body {
+            font-family: 'Khmer Bokor', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-body);
+            color: var(--text-main);
+            margin: 0;
+            padding: 14px;
+            display: flex;
+            justify-content: center;
+            position: relative;
+            overflow-x: hidden;
         }
 
-        const totalValue = typeof body.totalAdValue === "number" && body.totalAdValue > 0
-          ? body.totalAdValue
-          : 0.02;
-        const userShare = typeof body.userShare === "number" && body.userShare >= 0
-          ? body.userShare
-          : Number((totalValue * DEFAULT_SPLIT_RATIO).toFixed(6));
-        const adminShare = typeof body.adminShare === "number" && body.adminShare >= 0
-          ? body.adminShare
-          : Number((totalValue - userShare).toFixed(6));
-
-        const sysState = await readSystemState(env);
-        const userState = await readUserState(env, userId);
-
-        const nextUserBalance = Number((Number(userState.balance || 0) + userShare).toFixed(6));
-        const nextUserViews = Number(userState.views || 0) + 1;
-        const savedUser = await writeUserState(env, userId, {
-          balance: nextUserBalance,
-          views: nextUserViews
-        });
-
-        const nextAdminBalance = Number((Number(sysState.adminBalance || 0) + adminShare).toFixed(6));
-        const nextTotalViews = Number(sysState.totalSystemViews || 0) + 1;
-        const savedSys = await writeSystemState(env, {
-          ...sysState,
-          adminBalance: nextAdminBalance,
-          totalSystemViews: nextTotalViews
-        });
-
-        return jsonResponse({
-          ok: true,
-          userId,
-          userBalance: savedUser.balance,
-          userViews: savedUser.views,
-          adminBalance: savedSys.adminBalance,
-          totalSystemViews: savedSys.totalSystemViews,
-          updatedAt: savedSys.updatedAt
-        });
-      }
-
-      // POST /withdraw (កត់ត្រាការដកប្រាក់អប្បបរមា $1.00)
-      if (request.method === "POST" && path === "/withdraw") {
-        const body = await request.json();
-        const userId = String(body.userId || "").trim();
-        const method = String(body.method || "").trim();
-        const accountInfo = String(body.accountInfo || "").trim();
-
-        if (!userId || !method || !accountInfo) {
-          return jsonResponse({ ok: false, error: "Invalid withdraw fields" }, 400);
+        .khmer-corner-layer {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 5;
         }
 
-        const userState = await readUserState(env, userId);
-        const currentBalance = Number(userState.balance || 0);
-        if (currentBalance < 1.0) {
-          return jsonResponse({ ok: false, error: "Minimum withdrawal is $1.00" }, 400);
+        .khmer-corner {
+            position: absolute;
+            width: 82px;
+            height: 82px;
+            opacity: 0.92;
         }
 
-        await writeUserState(env, userId, {
-          balance: 0,
-          views: Number(userState.views || 0)
+        .khmer-corner.top-left { top: 4px; left: 4px; }
+        .khmer-corner.top-right { top: 4px; right: 4px; transform: scaleX(-1); }
+        .khmer-corner.bottom-left { bottom: 4px; left: 4px; transform: scaleY(-1); }
+        .khmer-corner.bottom-right { bottom: 4px; right: 4px; transform: scale(-1, -1); }
+
+        .khmer-text-banner-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px auto 16px auto;
+            padding: 10px 24px;
+            max-width: 100%;
+            min-height: 54px;
+        }
+
+        .khmer-text-banner-frame {
+            position: relative;
+            background: linear-gradient(180deg, var(--khmer-maroon) 0%, var(--khmer-maroon-dark) 100%);
+            color: var(--khmer-gold-bright);
+            border: 3px solid var(--khmer-gold);
+            border-radius: 14px;
+            padding: 10px 22px;
+            box-shadow:
+                0 0 0 2px #b45309,
+                0 6px 18px rgba(0, 0, 0, 0.45),
+                inset 0 0 12px rgba(250, 204, 21, 0.25);
+            text-align: center;
+            z-index: 2;
+        }
+
+        .khmer-text-banner-frame::before,
+        .khmer-text-banner-frame::after {
+            content: "";
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 28px;
+            background: linear-gradient(135deg, var(--khmer-gold-bright), #d97706);
+            clip-path: polygon(100% 0%, 0% 50%, 100% 100%);
+        }
+
+        .khmer-text-banner-frame::before { left: -14px; }
+        .khmer-text-banner-frame::after { right: -14px; transform: translateY(-50%) scaleX(-1); }
+
+        .khmer-banner-title {
+            font-size: 18px;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            color: var(--khmer-gold-bright);
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.7);
+            line-height: 1.4;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 420px;
+            position: relative;
+            z-index: 10;
+            border: 2px solid rgba(234, 179, 8, 0.55);
+            border-radius: 20px;
+            padding: 14px;
+            background: rgba(7, 22, 41, 0.78);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 0 20px rgba(234, 179, 8, 0.12);
+        }
+
+        #onboarding-screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, #05101e, #002b55);
+            color: white;
+            z-index: 999;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+
+        .onboarding-card {
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(10px);
+            border-radius: 18px;
+            padding: 22px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+            border: 2px solid rgba(234, 179, 8, 0.65);
+            position: relative;
+            z-index: 1001;
+        }
+
+        #ad-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(4, 12, 22, 0.94);
+            z-index: 1050;
+            justify-content: center;
+            align-items: center;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+
+        .ad-modal-card {
+            background: #ffffff;
+            color: var(--text-main);
+            border-radius: 16px;
+            padding: 18px;
+            width: 100%;
+            max-width: 390px;
+            text-align: center;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+            border: 2px solid var(--khmer-gold);
+        }
+
+        .ad-banner-box {
+            background: linear-gradient(135deg, var(--khmer-maroon), var(--khmer-maroon-dark));
+            color: var(--khmer-gold-bright);
+            border: 2px solid var(--khmer-gold);
+            border-radius: 12px;
+            padding: 16px 14px;
+            margin: 12px 0;
+        }
+
+        .ad-link-preview {
+            background: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            border-radius: 10px;
+            padding: 10px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            color: #0f172a;
+            word-break: break-all;
+            text-align: left;
+        }
+
+        .ad-frame-wrap {
+            display: none;
+            width: 100%;
+            height: 170px;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid #cbd5e1;
+            margin-bottom: 12px;
+            background: #0f172a;
+        }
+
+        .ad-frame-wrap iframe {
+            width: 100%;
+            height: 100%;
+            border: 0;
+        }
+
+        .aba-card {
+            background-color: var(--aba-card);
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.22);
+            border: 1.5px solid rgba(234, 179, 8, 0.5);
+        }
+
+        .aba-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #e2e8f0;
+            padding-bottom: 8px;
+        }
+
+        .aba-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: var(--aba-blue);
+        }
+
+        .balance-box {
+            background: linear-gradient(135deg, #003b73, #001b36);
+            color: white;
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 14px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+            border: 2px solid var(--khmer-gold);
+        }
+
+        .balance-amount {
+            font-size: 32px;
+            font-weight: bold;
+            margin: 6px 0;
+            color: var(--khmer-gold-bright);
+        }
+
+        .aba-btn {
+            font-family: 'Khmer Bokor', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--aba-blue);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 12px 16px;
+            font-size: 15px;
+            font-weight: bold;
+            width: 100%;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: opacity 0.2s;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .aba-btn:active { opacity: 0.85; }
+        .aba-btn:disabled { background-color: #94a3b8; cursor: not-allowed; box-shadow: none; }
+
+        .success-btn { background-color: var(--success); }
+        .danger-btn { background-color: var(--danger); }
+
+        .input-group {
+            margin-bottom: 12px;
+        }
+        .input-group label {
+            display: block;
+            margin-bottom: 4px;
+            font-size: 13px;
+            color: var(--text-sub);
+            font-weight: 600;
+        }
+        .input-group select, .input-group input, .input-group textarea {
+            font-family: 'Khmer Bokor', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid #cbd5e1;
+            background-color: #f8fafc;
+            color: var(--text-main);
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+
+        .ad-status-pill {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .status-available {
+            background: #dcfce7;
+            color: #065f46;
+            border: 1px solid #10b981;
+        }
+
+        .status-empty {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #ef4444;
+        }
+
+        .log-list {
+            font-size: 12px;
+            color: var(--text-sub);
+            max-height: 100px;
+            overflow-y: auto;
+            background: #f8fafc;
+            padding: 8px;
+            border-radius: 8px;
+        }
+
+        #admin-panel {
+            display: none;
+            border: 2px dashed var(--khmer-maroon);
+            background: #fff8eb;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ក្បាច់ស៊ុមជ្រុងខ្មែរទាំង ៤ ជ្រុង -->
+    <div class="khmer-corner-layer" aria-hidden="true">
+        <svg class="khmer-corner top-left" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 8H96C84 14 76 22 72 34C64 24 52 20 40 24C44 36 40 48 30 56C18 60 12 72 8 88V8Z" fill="#f59e0b" stroke="#fde047" stroke-width="2"/>
+            <path d="M16 16C34 16 48 26 54 44C42 40 32 44 26 54C22 42 16 32 16 16Z" fill="#facc15"/>
+            <path d="M12 12L36 36M22 12L44 24M12 22L24 44" stroke="#fef08a" stroke-width="1.5"/>
+            <circle cx="18" cy="18" r="4" fill="#b45309"/>
+        </svg>
+
+        <svg class="khmer-corner top-right" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 8H96C84 14 76 22 72 34C64 24 52 20 40 24C44 36 40 48 30 56C18 60 12 72 8 88V8Z" fill="#f59e0b" stroke="#fde047" stroke-width="2"/>
+            <path d="M16 16C34 16 48 26 54 44C42 40 32 44 26 54C22 42 16 32 16 16Z" fill="#facc15"/>
+            <path d="M12 12L36 36M22 12L44 24M12 22L24 44" stroke="#fef08a" stroke-width="1.5"/>
+            <circle cx="18" cy="18" r="4" fill="#b45309"/>
+        </svg>
+
+        <svg class="khmer-corner bottom-left" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 8H96C84 14 76 22 72 34C64 24 52 20 40 24C44 36 40 48 30 56C18 60 12 72 8 88V8Z" fill="#f59e0b" stroke="#fde047" stroke-width="2"/>
+            <path d="M16 16C34 16 48 26 54 44C42 40 32 44 26 54C22 42 16 32 16 16Z" fill="#facc15"/>
+            <path d="M12 12L36 36M22 12L44 24M12 22L24 44" stroke="#fef08a" stroke-width="1.5"/>
+            <circle cx="18" cy="18" r="4" fill="#b45309"/>
+        </svg>
+
+        <svg class="khmer-corner bottom-right" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 8H96C84 14 76 22 72 34C64 24 52 20 40 24C44 36 40 48 30 56C18 60 12 72 8 88V8Z" fill="#f59e0b" stroke="#fde047" stroke-width="2"/>
+            <path d="M16 16C34 16 48 26 54 44C42 40 32 44 26 54C22 42 16 32 16 16Z" fill="#facc15"/>
+            <path d="M12 12L36 36M22 12L44 24M12 22L24 44" stroke="#fef08a" stroke-width="1.5"/>
+            <circle cx="18" cy="18" r="4" fill="#b45309"/>
+        </svg>
+    </div>
+
+    <!-- ផ្ទាំងស្វាគមន៍ -->
+    <div id="onboarding-screen">
+        <div class="onboarding-card">
+            <div class="khmer-text-banner-wrap">
+                <div class="khmer-text-banner-frame">
+                    <div class="khmer-banner-title">សួស្តីស្វាគមន៍មកកាន់ Khmer Rewards</div>
+                </div>
+            </div>
+            <p style="font-size: 14px; line-height: 1.6; color: #e2e8f0;">
+                កម្មវិធីឌីជីថលដែលផ្តល់ជូនលោកអ្នកនូវចំណូល ៥០% នៃការមើលពាណិជ្ជកម្មពិតប្រាកដ។ ដកប្រាក់បានយ៉ាងឆាប់រហ័ស គ្រប់ធនាគារក្នុងស្រុក ឬកាតទូរស័ព្ទ។
+            </p>
+            <ul style="text-align: left; font-size: 13px; margin: 15px 0; color: #fef08a; padding-left: 20px; line-height: 1.7;">
+                <li>តភ្ជាប់ជាមួយ Telegram ស្វ័យប្រវត្តិ</li>
+                <li>ប្រព័ន្ធពិនិត្យ Ads ពិត និង Update រាល់ ១ នាទី</li>
+                <li>ដកប្រាក់អប្បបរមាត្រឹម ១.០០ ដុល្លារ</li>
+            </ul>
+            <button class="aba-btn success-btn" onclick="closeOnboarding()">យល់ព្រម និងចាប់ផ្តើម</button>
+        </div>
+    </div>
+
+    <!-- ផ្ទាំងបង្ហាញពាណិជ្ជកម្ម -->
+    <div id="ad-modal">
+        <div class="ad-modal-card">
+            <div class="khmer-text-banner-wrap" style="margin-top: 0; margin-bottom: 10px;">
+                <div class="khmer-text-banner-frame" style="padding: 7px 18px;">
+                    <div class="khmer-banner-title" style="font-size: 15px;">ពាណិជ្ជកម្មកំពុងបង្ហាញ</div>
+                </div>
+            </div>
+
+            <div class="ad-banner-box">
+                <div id="ad-headline" style="font-size: 16px; font-weight: bold; margin-bottom: 4px;">ពាណិជ្ជកម្មដែលមានក្នុងប្រព័ន្ធ</div>
+                <div id="ad-subtext" style="font-size: 12px; color: #fef9c3; line-height: 1.5;">
+                    មើលពាណិជ្ជកម្មឱ្យចប់ពេលកំណត់ ដើម្បីទទួលបានកម្រៃ ៥០% និង Update ទៅ Admin ភ្លាមៗ។
+                </div>
+            </div>
+
+            <div id="ad-frame-wrap" class="ad-frame-wrap">
+                <iframe id="ad-iframe" src="" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
+            </div>
+
+            <div id="ad-link-box" class="ad-link-preview" style="display: none;">
+                <div><strong>តំណភ្ជាប់ពាណិជ្ជកម្ម (<span id="ad-queue-info"></span>):</strong></div>
+                <div id="ad-link-url"></div>
+                <button type="button" class="aba-btn" style="padding: 8px 12px; font-size: 13px; margin-top: 8px;" onclick="openActiveAdLink()">
+                    បើកមើល Link ពាណិជ្ជកម្ម
+                </button>
+            </div>
+
+            <div id="ad-countdown-text" style="font-size: 14px; font-weight: bold; color: #d97706; margin-bottom: 10px;">
+                សូមរង់ចាំ ៥ វិនាទី...
+            </div>
+
+            <button id="claim-ad-btn" class="aba-btn success-btn" disabled onclick="completeAdReward()">កំពុងរាប់ពេល...</button>
+            <button type="button" class="aba-btn danger-btn" onclick="cancelAd()">បិទពាណិជ្ជកម្ម</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- ស៊ុមអក្សរក្បាច់ខ្មែរសម្រាប់ចំណងជើងកម្មវិធី -->
+        <div class="khmer-text-banner-wrap">
+            <div class="khmer-text-banner-frame">
+                <div class="khmer-banner-title">ស៊ុមអក្សរក្បាច់ខ្មែរ - Khmer Rewards</div>
+            </div>
+        </div>
+
+        <!-- Header Profile -->
+        <div class="aba-card" style="display: flex; align-items: center; justify-content: space-between;">
+            <div>
+                <div style="font-size: 12px; color: var(--text-sub);">គណនីតភ្ជាប់រួច</div>
+                <div id="user-profile-name" style="font-weight: bold; font-size: 15px; color: var(--aba-blue);">កំពុងផ្ទុក...</div>
+            </div>
+            <div id="admin-badge" style="display: none; background: #fee2e2; color: #dc2626; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: bold;">ADMIN</div>
+        </div>
+
+        <!-- Balance Card -->
+        <div class="balance-box">
+            <div style="font-size: 13px; opacity: 0.95;">សមតុល្យរបស់អ្នក (ចំណែក ៥០%)</div>
+            <div class="balance-amount" id="user-balance">$0.000</div>
+            <div style="font-size: 12px; opacity: 0.9;">សរុបមើលពាណិជ្ជកម្ម: <span id="view-count">0</span> ដង</div>
+        </div>
+
+        <!-- Watch Ads Section -->
+        <div class="aba-card">
+            <div class="aba-header">
+                <span class="aba-title">ប្រព័ន្ធពាណិជ្ជកម្ម (Update រាល់ ១ នាទី)</span>
+            </div>
+            <div style="text-align: center;">
+                <span id="ad-availability-badge" class="ad-status-pill status-empty">កំពុងពិនិត្យស្ថានភាពពាណិជ្ជកម្ម...</span>
+            </div>
+            <p id="ad-pool-summary" style="font-size: 13px; color: var(--text-sub); margin-top: 4px; text-align: center;">
+                ចំនួន Ads មានស្រាប់: 0 | Update ចុងក្រោយ: កំពុងផ្ទុក
+            </p>
+            <button class="aba-btn" id="watch-ad-btn" onclick="watchAd()">ពិនិត្យ និងមើលពាណិជ្ជកម្ម</button>
+            <div id="ad-check-feedback" style="font-size: 13px; font-weight: bold; text-align: center; margin-top: 8px; color: var(--aba-blue);"></div>
+        </div>
+
+        <!-- Withdraw Section -->
+        <div class="aba-card">
+            <div class="aba-header">
+                <span class="aba-title">ដកប្រាក់ស្វ័យប្រវត្តិ (ABA / KHQR / Phone)</span>
+            </div>
+            <div class="input-group">
+                <label>ជ្រើសរើសប្រភេទដកប្រាក់</label>
+                <select id="withdraw-method" onchange="updateWithdrawPlaceholder()">
+                    <option value="aba">ABA Bank (គណនីធនាគារ)</option>
+                    <option value="khqr">KHQR គ្រប់ធនាគារ</option>
+                    <option value="phone">កាតទូរស័ព្ទ (Cellcard / Smart / Metfone)</option>
+                </select>
+            </div>
+            <div class="input-group">
+                <label id="account-label">លេខគណនី ABA / ឈ្មោះម្ចាស់</label>
+                <input type="text" id="account-info" placeholder="ឧ. 000 111 222 (Name)">
+            </div>
+            <button class="aba-btn success-btn" onclick="requestWithdraw()">ស្នើសុំដកប្រាក់ (អប្បបរមា $1.00)</button>
+        </div>
+
+        <!-- Admin Panel (បង្ហាញសម្រាប់ @SameanMom168 តែម្នាក់គត់) -->
+        <div class="aba-card" id="admin-panel">
+            <div class="aba-header">
+                <span class="aba-title" style="color: #dc2626;">ផ្ទាំងគ្រប់គ្រង Admin</span>
+            </div>
+            <p style="font-size: 12px; color: #1e293b;">គ្រប់គ្រងបញ្ជី Link Ads ជាច្រើន និងចំណូលប្រព័ន្ធសម្រាប់ @SameanMom168៖</p>
+
+            <div style="background: #e2e8f0; padding: 10px; border-radius: 8px; margin-bottom: 12px; text-align: center;">
+                <div style="font-size: 12px; color: var(--text-sub);">សមតុល្យចំណូលសរុបរបស់ Admin</div>
+                <div id="admin-total-balance" style="font-size: 20px; font-weight: bold; color: var(--aba-blue);">$0.000</div>
+                <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
+                    សរុបការមើលទាំងអស់ក្នុងប្រព័ន្ធ: <span id="admin-total-views">0</span> ដង
+                </div>
+            </div>
+
+            <div class="input-group">
+                <label>ដាក់ Link Ads ជាច្រើន (១ Link ក្នុង ១ បន្ទាត់ - Update រាល់ ១ នាទី)</label>
+                <textarea id="custom-ad-links" rows="4" placeholder="https://example.com/ad-1&#10;https://example.com/ad-2&#10;https://example.com/ad-3"></textarea>
+            </div>
+
+            <div class="input-group">
+                <label>Cloudflare Worker API URL (ស្រេចចិត្ត - សម្រាប់ទាញ/ផ្ញើ Ads និងចំណូលរាល់នាទី)</label>
+                <input type="url" id="worker-api-url" placeholder="ឧ. https://your-worker.workers.dev">
+            </div>
+
+            <div class="input-group">
+                <label>AdsGram Block ID (ស្រេចចិត្ត)</label>
+                <input type="text" id="adsgram-block-id" placeholder="ឧ. 1234">
+            </div>
+
+            <div class="input-group">
+                <label>គណនីធនាគារ ABA ផ្ទាល់ខ្លួនរបស់ Admin សម្រាប់ទទួលប្រាក់</label>
+                <input type="text" id="admin-bank-account" placeholder="បញ្ចូលលេខគណនី ABA...">
+            </div>
+
+            <button class="aba-btn" onclick="saveAdminSettings()">រក្សាទុកការកំណត់ Admin</button>
+            <div style="margin-top: 10px; font-size: 12px; font-weight: bold; color: var(--success);" id="admin-status-text"></div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="aba-card">
+            <div class="aba-header">
+                <span class="aba-title" style="font-size: 14px;">ប្រវត្តិសកម្មភាព</span>
+            </div>
+            <div class="log-list" id="activity-log">
+                <div>ប្រព័ន្ធបានចាប់ផ្តើមដំណើរការដោយជោគជ័យ។</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ADMIN_USERNAME = "SameanMom168";
+        const TOTAL_AD_VALUE = 0.02;
+        const SPLIT_RATIO = 0.5;
+        const COOLDOWN_SEC = 3;
+        const AD_WATCH_DURATION_SEC = 5;
+        const AUTO_UPDATE_INTERVAL_MS = 60000;
+
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        const tgUser = tg.initDataUnsafe?.user || null;
+        const displayName = tgUser
+            ? (tgUser.first_name + (tgUser.last_name ? " " + tgUser.last_name : ""))
+            : "គណនីសាកល្បង";
+        const userHandle = tgUser && tgUser.username ? tgUser.username : "";
+        const userId = tgUser && tgUser.id ? String(tgUser.id) : "local_test_user";
+
+        document.getElementById("user-profile-name").innerText = userHandle
+            ? `${displayName} (@${userHandle})`
+            : `${displayName} (ID: ${userId})`;
+
+        const isAdmin = userHandle.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+        if (isAdmin) {
+            document.getElementById("admin-badge").style.display = "block";
+            document.getElementById("admin-panel").style.display = "block";
+        }
+
+        let globalAdminState = JSON.parse(localStorage.getItem("system_admin_state")) || {
+            adminBalance: 0.000,
+            totalSystemViews: 0,
+            adminBank: "000 000 000 (Admin Default)",
+            adsgramBlockId: "",
+            customAdLinks: [],
+            workerApiUrl: "",
+            lastAdsUpdate: ""
+        };
+
+        if (!Array.isArray(globalAdminState.customAdLinks)) {
+            globalAdminState.customAdLinks = globalAdminState.customAdLink ? [globalAdminState.customAdLink] : [];
+        }
+
+        let state = JSON.parse(localStorage.getItem(`user_state_${userId}`)) || {
+            balance: 0.000,
+            views: 0,
+            lastWatchTime: 0,
+            adCursor: 0
+        };
+
+        document.getElementById("admin-bank-account").value = globalAdminState.adminBank || "";
+        document.getElementById("adsgram-block-id").value = globalAdminState.adsgramBlockId || "";
+        document.getElementById("custom-ad-links").value = (globalAdminState.customAdLinks || []).join("\n");
+        document.getElementById("worker-api-url").value = globalAdminState.workerApiUrl || "";
+
+        let adCountdownInterval = null;
+        let activeAdUrl = "";
+
+        function isValidHttpUrl(str) {
+            try {
+                const u = new URL(str);
+                return u.protocol === "http:" || u.protocol === "https:";
+            } catch (_) {
+                return false;
+            }
+        }
+
+        function parseAdLinks(rawTextOrArray) {
+            const items = Array.isArray(rawTextOrArray)
+                ? rawTextOrArray
+                : String(rawTextOrArray || "").split(/\r?\n/);
+
+            const unique = [];
+            for (const item of items) {
+                const trimmed = String(item || "").trim();
+                if (trimmed && isValidHttpUrl(trimmed) && !unique.includes(trimmed)) {
+                    unique.push(trimmed);
+                }
+            }
+            return unique;
+        }
+
+        function hasAvailableAds() {
+            const validLinks = parseAdLinks(globalAdminState.customAdLinks);
+            const hasAdsgram = Boolean((globalAdminState.adsgramBlockId || "").trim());
+            return validLinks.length > 0 || hasAdsgram;
+        }
+
+        function persistStates() {
+            localStorage.setItem(`user_state_${userId}`, JSON.stringify(state));
+            localStorage.setItem("system_admin_state", JSON.stringify(globalAdminState));
+        }
+
+        function updateAdAvailabilityUI() {
+            const validLinks = parseAdLinks(globalAdminState.customAdLinks);
+            const hasAdsgram = Boolean((globalAdminState.adsgramBlockId || "").trim());
+            const totalAdsCount = validLinks.length + (hasAdsgram ? 1 : 0);
+            const badge = document.getElementById("ad-availability-badge");
+            const summary = document.getElementById("ad-pool-summary");
+            const updatedLabel = globalAdminState.lastAdsUpdate || new Date().toLocaleTimeString();
+
+            if (totalAdsCount > 0) {
+                badge.className = "ad-status-pill status-available";
+                badge.innerText = `មានពាណិជ្ជកម្ម (${totalAdsCount} ប្រភព/Link)`;
+            } else {
+                badge.className = "ad-status-pill status-empty";
+                badge.innerText = "មិនមានពាណិជ្ជកម្មនៅពេលនេះ";
+            }
+
+            summary.innerText = `ចំនួន Ads មានស្រាប់: ${totalAdsCount} | Update ចុងក្រោយ: ${updatedLabel}`;
+        }
+
+        function updateUI() {
+            document.getElementById("user-balance").innerText = `$${state.balance.toFixed(3)}`;
+            document.getElementById("view-count").innerText = state.views;
+            document.getElementById("admin-total-balance").innerText = `$${globalAdminState.adminBalance.toFixed(3)}`;
+            document.getElementById("admin-total-views").innerText = globalAdminState.totalSystemViews;
+            updateAdAvailabilityUI();
+            persistStates();
+        }
+
+        async function refreshAdsEveryMinute(isAutoTick = false) {
+            const apiUrl = (globalAdminState.workerApiUrl || "").trim();
+            if (apiUrl && isValidHttpUrl(apiUrl)) {
+                try {
+                    const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/state?userId=${encodeURIComponent(userId)}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (typeof data.adminBalance === "number") {
+                            globalAdminState.adminBalance = data.adminBalance;
+                        }
+                        if (typeof data.totalSystemViews === "number") {
+                            globalAdminState.totalSystemViews = data.totalSystemViews;
+                        }
+                        if (Array.isArray(data.customAdLinks)) {
+                            globalAdminState.customAdLinks = parseAdLinks(data.customAdLinks);
+                            if (isAdmin && document.activeElement !== document.getElementById("custom-ad-links")) {
+                                document.getElementById("custom-ad-links").value = globalAdminState.customAdLinks.join("\n");
+                            }
+                        } else if (typeof data.customAdLink === "string") {
+                            globalAdminState.customAdLinks = parseAdLinks(data.customAdLink);
+                        }
+                        if (typeof data.userBalance === "number") {
+                            state.balance = data.userBalance;
+                        }
+                        if (typeof data.userViews === "number") {
+                            state.views = data.userViews;
+                        }
+                    }
+                } catch (_) {}
+            }
+
+            globalAdminState.lastAdsUpdate = new Date().toLocaleTimeString();
+            updateUI();
+            if (isAutoTick) {
+                addLog(`Update បញ្ជី Ads រាល់ ១ នាទីរួចរាល់ (មាន Ads: ${hasAvailableAds() ? "មាន" : "មិនមាន"})។`);
+            }
+        }
+
+        async function syncRevenueToAdmin(userShare, adminShare) {
+            globalAdminState.adminBalance = Number((globalAdminState.adminBalance + adminShare).toFixed(6));
+            globalAdminState.totalSystemViews += 1;
+            persistStates();
+
+            const apiUrl = (globalAdminState.workerApiUrl || "").trim();
+            if (apiUrl && isValidHttpUrl(apiUrl)) {
+                try {
+                    const res = await fetch(`${apiUrl.replace(/\/+$/, "")}/reward`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            userId,
+                            userHandle,
+                            userShare,
+                            adminShare,
+                            userBalance: state.balance,
+                            userViews: state.views
+                        })
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (typeof data.adminBalance === "number") {
+                            globalAdminState.adminBalance = data.adminBalance;
+                        }
+                        if (typeof data.totalSystemViews === "number") {
+                            globalAdminState.totalSystemViews = data.totalSystemViews;
+                        }
+                        persistStates();
+                    }
+                } catch (_) {}
+            }
+        }
+
+        function closeOnboarding() {
+            document.getElementById("onboarding-screen").style.display = "none";
+        }
+
+        function updateWithdrawPlaceholder() {
+            const method = document.getElementById("withdraw-method").value;
+            const label = document.getElementById("account-label");
+            const input = document.getElementById("account-info");
+            if (method === "aba") {
+                label.innerText = "លេខគណនី ABA / ឈ្មោះម្ចាស់";
+                input.placeholder = "ឧ. 000 111 222 (Name)";
+            } else if (method === "khqr") {
+                label.innerText = "លេខទូរស័ព្ទ ឬ KHQR ID";
+                input.placeholder = "ឧ. 012 345 678";
+            } else {
+                label.innerText = "លេខទូរស័ព្ទទទួលកាត (Cellcard/Smart)";
+                input.placeholder = "ឧ. 012 345 678";
+            }
+        }
+
+        function openActiveAdLink() {
+            if (!activeAdUrl || !isValidHttpUrl(activeAdUrl)) return;
+            if (tg && typeof tg.openLink === "function") {
+                tg.openLink(activeAdUrl);
+            } else {
+                window.open(activeAdUrl, "_blank", "noopener,noreferrer");
+            }
+        }
+
+        function pickNextAdLink() {
+            const links = parseAdLinks(globalAdminState.customAdLinks);
+            if (links.length === 0) return { url: "", index: -1, total: 0 };
+            const idx = state.adCursor % links.length;
+            state.adCursor = (state.adCursor + 1) % links.length;
+            persistStates();
+            return { url: links[idx], index: idx, total: links.length };
+        }
+
+        function openLinkAdModal(adSelection) {
+            activeAdUrl = adSelection.url;
+            let remaining = AD_WATCH_DURATION_SEC;
+            const modal = document.getElementById("ad-modal");
+            const countdownEl = document.getElementById("ad-countdown-text");
+            const claimBtn = document.getElementById("claim-ad-btn");
+            const linkBox = document.getElementById("ad-link-box");
+            const linkUrlEl = document.getElementById("ad-link-url");
+            const queueInfoEl = document.getElementById("ad-queue-info");
+            const frameWrap = document.getElementById("ad-frame-wrap");
+            const iframeEl = document.getElementById("ad-iframe");
+            const headlineEl = document.getElementById("ad-headline");
+            const subtextEl = document.getElementById("ad-subtext");
+
+            headlineEl.innerText = "មានពាណិជ្ជកម្ម - កំពុងបង្ហាញ";
+            subtextEl.innerText = "មើលពាណិជ្ជកម្មឱ្យចប់ពេលកំណត់ ដើម្បីទទួលបានកម្រៃ ៥០% និង Update ទៅ Admin ភ្លាមៗ។";
+
+            linkBox.style.display = "block";
+            queueInfoEl.innerText = `Ad ទី ${adSelection.index + 1} / ${adSelection.total}`;
+            linkUrlEl.innerText = activeAdUrl;
+
+            frameWrap.style.display = "block";
+            iframeEl.src = activeAdUrl;
+
+            claimBtn.disabled = true;
+            claimBtn.innerText = `រង់ចាំ ${remaining} វិនាទី...`;
+            countdownEl.innerText = `សូមរង់ចាំ ${remaining} វិនាទី ដើម្បីទទួលរង្វាន់...`;
+            modal.style.display = "flex";
+
+            clearInterval(adCountdownInterval);
+            adCountdownInterval = setInterval(() => {
+                remaining -= 1;
+                if (remaining > 0) {
+                    claimBtn.innerText = `រង់ចាំ ${remaining} វិនាទី...`;
+                    countdownEl.innerText = `សូមរង់ចាំ ${remaining} វិនាទី ដើម្បីទទួលរង្វាន់...`;
+                } else {
+                    clearInterval(adCountdownInterval);
+                    countdownEl.innerText = "បានបញ្ចប់ការមើលពាណិជ្ជកម្ម! ចុចយករង្វាន់ឥឡូវនេះ។";
+                    claimBtn.disabled = false;
+                    claimBtn.innerText = "ទទួលរង្វាន់ឥឡូវនេះ";
+                }
+            }, 1000);
+        }
+
+        function cancelAd() {
+            clearInterval(adCountdownInterval);
+            activeAdUrl = "";
+            document.getElementById("ad-iframe").src = "";
+            document.getElementById("ad-modal").style.display = "none";
+            document.getElementById("watch-ad-btn").disabled = false;
+            document.getElementById("watch-ad-btn").innerText = "ពិនិត្យ និងមើលពាណិជ្ជកម្ម";
+            addLog("បានបិទពាណិជ្ជកម្មមុនពេលបញ្ចប់ (មិនទទួលបានទឹកប្រាក់)។");
+        }
+
+        async function completeAdReward() {
+            clearInterval(adCountdownInterval);
+            activeAdUrl = "";
+            document.getElementById("ad-iframe").src = "";
+            document.getElementById("ad-modal").style.display = "none";
+
+            const userShare = Number((TOTAL_AD_VALUE * SPLIT_RATIO).toFixed(6));
+            const adminShare = Number((TOTAL_AD_VALUE * (1 - SPLIT_RATIO)).toFixed(6));
+
+            state.balance = Number((state.balance + userShare).toFixed(6));
+            state.views += 1;
+            state.lastWatchTime = Date.now();
+
+            await syncRevenueToAdmin(userShare, adminShare);
+            updateUI();
+
+            document.getElementById("ad-check-feedback").style.color = "var(--success)";
+            document.getElementById("ad-check-feedback").innerText = `មានពាណិជ្ជកម្ម! បានបញ្ចូល +$${userShare.toFixed(3)} និង Update ទៅ Admin រួចរាល់។`;
+            addLog(`បានមើលពាណិជ្ជកម្មជោគជ័យ (+$${userShare.toFixed(3)}) និង Update ទៅ Admin រួចរាល់។`);
+
+            const btn = document.getElementById("watch-ad-btn");
+            btn.disabled = false;
+            btn.innerText = "ពិនិត្យ និងមើលពាណិជ្ជកម្ម";
+        }
+
+        async function watchAd() {
+            const now = Date.now();
+            const elapsed = (now - state.lastWatchTime) / 1000;
+
+            if (state.lastWatchTime > 0 && elapsed < COOLDOWN_SEC) {
+                const waitSec = Math.ceil(COOLDOWN_SEC - elapsed);
+                document.getElementById("ad-check-feedback").style.color = "#d97706";
+                document.getElementById("ad-check-feedback").innerText = `សូមរង់ចាំ ${waitSec} វិនាទីទៀត មុនមើលពាណិជ្ជកម្មបន្ទាប់។`;
+                return;
+            }
+
+            const btn = document.getElementById("watch-ad-btn");
+            const feedback = document.getElementById("ad-check-feedback");
+            btn.disabled = true;
+            btn.innerText = "កំពុងពិនិត្យពាណិជ្ជកម្ម...";
+            feedback.style.color = "var(--aba-blue)";
+            feedback.innerText = "កំពុងពិនិត្យថា មាន ឬមិនមានពាណិជ្ជកម្ម...";
+
+            await refreshAdsEveryMinute(false);
+
+            const blockId = (globalAdminState.adsgramBlockId || "").trim();
+            if (blockId && window.Adsgram) {
+                try {
+                    const AdController = window.Adsgram.init({ blockId });
+                    await AdController.show();
+                    feedback.style.color = "var(--success)";
+                    feedback.innerText = "មានពាណិជ្ជកម្មពី AdsGram! កំពុងគណនារង្វាន់...";
+                    await completeAdReward();
+                    return;
+                } catch (_) {}
+            }
+
+            const nextAd = pickNextAdLink();
+            if (nextAd.url) {
+                feedback.style.color = "var(--success)";
+                feedback.innerText = `មានពាណិជ្ជកម្ម! កំពុងបើក Link Ad ទី ${nextAd.index + 1}/${nextAd.total}។`;
+                openLinkAdModal(nextAd);
+                return;
+            }
+
+            feedback.style.color = "var(--danger)";
+            feedback.innerText = "មិនមានពាណិជ្ជកម្មនៅពេលនេះទេ! សូមរង់ចាំការ Update រាល់ ១ នាទី ឬបន្ថែម Link Ads ក្នុងផ្ទាំង Admin។";
+            addLog("ពិនិត្យឃើញថា មិនមានពាណិជ្ជកម្មសម្រាប់បង្ហាញទេ។");
+            btn.disabled = false;
+            btn.innerText = "ពិនិត្យ និងមើលពាណិជ្ជកម្ម";
+        }
+
+        function requestWithdraw() {
+            const method = document.getElementById("withdraw-method").value;
+            const info = document.getElementById("account-info").value.trim();
+
+            if (state.balance < 1.00) {
+                alert("សមតុល្យរបស់អ្នកមិនទាន់គ្រប់ ១.០០ ដុល្លារទេ (អប្បបរមា $1.00)។");
+                return;
+            }
+
+            if (!info) {
+                alert("សូមបញ្ចូលព័ត៌មានគណនីរបស់អ្នកឱ្យបានត្រឹមត្រូវ។");
+                return;
+            }
+
+            const withdrawnAmount = state.balance;
+            alert(`ស្នើសុំដកប្រាក់ចំនួន $${withdrawnAmount.toFixed(3)} ជោគជ័យ! ប្រព័ន្ធបានផ្ញើទៅកាន់ ${method.toUpperCase()} (${info}) ដោយស្វ័យប្រវត្តិ។`);
+
+            addLog(`ដកប្រាក់ $${withdrawnAmount.toFixed(3)} ទៅកាន់ ${method.toUpperCase()} (${info})`);
+
+            state.balance = 0.000;
+            updateUI();
+        }
+
+        async function saveAdminSettings() {
+            if (!isAdmin) {
+                alert("មុខងារនេះសម្រាប់តែ @SameanMom168 ប៉ុណ្ណោះ។");
+                return;
+            }
+
+            const bankVal = document.getElementById("admin-bank-account").value.trim();
+            const blockVal = document.getElementById("adsgram-block-id").value.trim();
+            const rawLinksText = document.getElementById("custom-ad-links").value;
+            const workerUrlVal = document.getElementById("worker-api-url").value.trim();
+
+            if (!bankVal) {
+                alert("សូមបញ្ចូលលេខគណនីធនាគារ។");
+                return;
+            }
+
+            const validLinks = parseAdLinks(rawLinksText);
+            if (rawLinksText.trim() && validLinks.length === 0) {
+                alert("Link Ads នីមួយៗត្រូវចាប់ផ្តើមដោយ https:// ឬ http://");
+                return;
+            }
+
+            if (workerUrlVal && !isValidHttpUrl(workerUrlVal)) {
+                alert("Cloudflare Worker URL ត្រូវចាប់ផ្តើមដោយ https:// ឬ http://");
+                return;
+            }
+
+            globalAdminState.adminBank = bankVal;
+            globalAdminState.adsgramBlockId = blockVal;
+            globalAdminState.customAdLinks = validLinks;
+            globalAdminState.workerApiUrl = workerUrlVal;
+            globalAdminState.lastAdsUpdate = new Date().toLocaleTimeString();
+            document.getElementById("custom-ad-links").value = validLinks.join("\n");
+            updateUI();
+
+            if (workerUrlVal) {
+                try {
+                    await fetch(`${workerUrlVal.replace(/\/+$/, "")}/settings`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            adminUsername: ADMIN_USERNAME,
+                            customAdLinks: validLinks,
+                            customAdLink: validLinks[0] || "",
+                            adminBank: bankVal
+                        })
+                    });
+                } catch (_) {}
+            }
+
+            document.getElementById("admin-status-text").innerText = `បានរក្សាទុក ${validLinks.length} Link Ads និងការកំណត់ Admin ដោយជោគជ័យ!`;
+            setTimeout(() => {
+                document.getElementById("admin-status-text").innerText = "";
+            }, 3000);
+            addLog(`Admin បានរក្សាទុក Link Ads ចំនួន ${validLinks.length} តំណភ្ជាប់។`);
+        }
+
+        function addLog(text) {
+            const logList = document.getElementById("activity-log");
+            const timeStr = new Date().toLocaleTimeString();
+            logList.innerHTML = `<div>[${timeStr}] ${text}</div>` + logList.innerHTML;
+        }
+
+        window.addEventListener("storage", (event) => {
+            if (event.key === "system_admin_state" && event.newValue) {
+                globalAdminState = JSON.parse(event.newValue);
+                if (!Array.isArray(globalAdminState.customAdLinks)) {
+                    globalAdminState.customAdLinks = globalAdminState.customAdLink ? [globalAdminState.customAdLink] : [];
+                }
+                if (isAdmin && document.activeElement !== document.getElementById("custom-ad-links")) {
+                    document.getElementById("custom-ad-links").value = globalAdminState.customAdLinks.join("\n");
+                }
+                updateUI();
+            }
         });
 
-        return jsonResponse({
-          ok: true,
-          withdrawnAmount: Number(currentBalance.toFixed(3)),
-          method,
-          accountInfo,
-          userBalance: 0
-        });
-      }
-
-      return jsonResponse({
-        ok: true,
-        service: "Khmer Rewards Cloudflare Worker",
-        admin: ADMIN_USERNAME,
-        endpoints: ["/state", "/settings", "/reward", "/withdraw"]
-      });
-    } catch (err) {
-      return jsonResponse({ ok: false, error: err.message || "Server error" }, 500);
-    }
-  }
-};
+        updateUI();
+        refreshAdsEveryMinute(false);
+        setInterval(() => {
+            refreshAdsEveryMinute(true);
+        }, AUTO_UPDATE_INTERVAL_MS);
+    </script>
+</body>
+</html>
